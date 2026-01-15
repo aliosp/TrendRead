@@ -1,0 +1,13 @@
+name: Scheduled Job
+
+on:
+  schedule:
+    - cron: '0 * * * *'   # 每天 UTC 02:00
+  workflow_dispatch:     # 可选：手动触发，方便测试
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Echo time
+        run: date
