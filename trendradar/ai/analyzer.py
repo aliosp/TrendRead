@@ -4,6 +4,7 @@ AI 分析器模块
 
 调用 AI 大模型对热点新闻进行深度分析
 支持 OpenAI、Google Gemini、Azure OpenAI 等兼容接口
+新增支持：GLM（需配置 base_url 或兼容的 GLM endpoint）
 """
 
 import json
@@ -51,7 +52,12 @@ class AIAnalyzer:
         # 从配置或环境变量获取 API Key
         self.api_key = config.get("API_KEY") or os.environ.get("AI_API_KEY", "")
         self.provider = config.get("PROVIDER", "openai")
+        # 默认模型（可被配置覆盖）
         self.model = config.get("MODEL", "gpt-4o-mini")
+        # 如果使用 GLM 且未显式指定 MODEL，设定一个友好默认值（可按需调整）
+        if str(self.provider).lower() == "glm" and not config.get("MODEL"):
+            self.model = "glm-6b"
+
         self.base_url = config.get("BASE_URL", "")
         self.timeout = config.get("TIMEOUT", 90)
         self.max_news = config.get("MAX_NEWS_FOR_ANALYSIS", 50)
@@ -336,6 +342,8 @@ class AIAnalyzer:
         """调用 AI API"""
         if self.provider == "gemini":
             return self._call_gemini(user_prompt)
+        if str(self.provider).lower() == "glm":
+            return self._call_glm(user_prompt)
         return self._call_openai_compatible(user_prompt)
 
     def _get_api_url(self) -> str:
@@ -433,6 +441,92 @@ class AIAnalyzer:
 
         data = response.json()
         return data["candidates"][0]["content"]["parts"][0]["text"]
+
+    def _call_glm(self, user_prompt: str) -> str:
+        """
+        调用 GLM 风格的模型
+
+        说明:
+        - 请求头使用:
+            Content-Type: application/json
+            Authorization: Bearer YOUR_API_KEY
+          （与你提供的请求头保持一致）
+        - 为保证兼容性，这里优先使用 self.base_url（必须为可请求的 GLM endpoint）。
+        - payload 采用与 OpenAI chat 类似的 messages 结构（许多 GLM 服务兼容或可适配）。
+        - 对返回结果做多种常见格式的容错解析（choices -> data -> output 等）。
+        - 如果未配置 base_url，会抛出异常并提示用户配置正确的端点。
+        """
+        import requests
+
+        url = self.base_url
+        if not url:
+            # 要求用户为 GLM 指定完整 base_url（不同厂商实现不一致）
+            raise ValueError("GLM 提供方需要配置 BASE_URL（完整 API 地址），请在配置中设置 BASE_URL")
+
+        # 使用与您提供的一致的请求头格式
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}",
+        }
+
+        messages = []
+        if self.system_prompt:
+            messages.append({"role": "system", "content": self.system_prompt})
+        messages.append({"role": "user", "content": user_prompt})
+
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": 0.7,
+            "max_tokens": 2000,
+        }
+
+        response = requests.post(
+            url,
+            headers=headers,
+            json=payload,
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+
+        data = response.json()
+
+        # 尽可能兼容多种返回格式
+        # 1. OpenAI-like: {"choices":[{"message":{"content":"..."}}, ...]}
+        try:
+            if isinstance(data, dict):
+                if "choices" in data and data["choices"]:
+                    first = data["choices"][0]
+                    # 支持 OpenAI-style message or text
+                    if isinstance(first, dict):
+                        if "message" in first and isinstance(first["message"], dict) and "content" in first["message"]:
+                            return first["message"]["content"]
+                        if "text" in first:
+                            return first["text"]
+                        if "delta" in first and isinstance(first["delta"], dict) and "content" in first["delta"]:
+                            return first["delta"]["content"]
+                # 2. some services return {"data":[{"content":"..."}], ...}
+                if "data" in data and isinstance(data["data"], list) and data["data"]:
+                    d0 = data["data"][0]
+                    if isinstance(d0, dict):
+                        for key in ("content", "text", "msg", "response"):
+                            if key in d0:
+                                return d0[key]
+                # 3. some services return {"output": "..." } or {"result": "..."}
+                for key in ("output", "result", "answer"):
+                    if key in data and isinstance(data[key], str):
+                        return data[key]
+        except Exception:
+            # 解析时容错，后面统一返回 raw json
+            pass
+
+        # 最后兜底：将整个响应转换为字符串返回
+        try:
+            # 尝试提取常见嵌套结构
+            txt = json.dumps(data, ensure_ascii=False)
+        except Exception:
+            txt = str(data)
+        return txt
 
     def _parse_response(self, response: str) -> AIAnalysisResult:
         """解析 AI 响应"""
